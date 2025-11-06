@@ -11,6 +11,157 @@ import cv2
 import time
 from collections import Counter
 import os
+import json
+import http.client
+import requests
+import base64
+import urllib.parse
+
+
+
+# === Replace these with your credentials ===
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+REDIRECT_URI = "http://127.0.0.1:8501"  # Streamlit default URL
+SCOPES = "user-read-currently-playing user-read-playback-state"
+
+# === Step 1: Generate Spotify Auth URL ===
+def get_auth_url():
+    auth_url = (
+        "https://accounts.spotify.com/authorize?"
+        + urllib.parse.urlencode({
+            "client_id": SPOTIFY_CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": SCOPES
+        })
+    )
+    return auth_url
+
+
+# === Step 2: Exchange Code for Token ===
+def get_token(code):
+    auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+    b64_auth = base64.b64encode(auth_str.encode()).decode()
+    headers = {
+        "Authorization": f"Basic {b64_auth}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI
+    }
+    response = requests.post("https://accounts.spotify.com/api/token", headers=headers, data=data)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        st.error(f"Spotify Token Error: {response.text}")
+        return None
+
+
+# === Step 3: Handle Spotify OAuth and store token ===
+if "spotify_token" not in st.session_state:
+    # ✅ Correct way to capture the query params
+    query_params = st.query_params.to_dict()
+
+    # Show the connection link first
+    if "code" not in query_params:
+        st.markdown(
+            f"[🎧 Connect to Spotify]({get_auth_url()})",
+            unsafe_allow_html=True
+        )
+        st.stop()
+
+    # ✅ Get code and exchange for token
+    code = query_params.get("code")
+    if isinstance(code, list):
+        code = code[0]
+
+    st.write("🔑 Authorization code received, requesting token...")
+
+    token_data = get_token(code)
+    if token_data:
+        st.session_state.spotify_token = token_data["access_token"]
+        st.session_state.refresh_token = token_data.get("refresh_token")
+        st.success("✅ Spotify connected successfully!")
+        st.rerun()  # 🔄 Reload the app so we don't reuse the same code
+    else:
+        st.error("❌ Failed to get access token. Please reconnect to Spotify.")
+        st.markdown(
+            f"[Reconnect to Spotify]({get_auth_url()})",
+            unsafe_allow_html=True
+        )
+        st.stop()
+else:
+    st.success("🎧 Spotify is already connected!")
+
+
+# Current song and feature collection would be handled here
+
+def get_current_track_id():
+    """Fetch currently playing track using the user's OAuth token."""
+    token = st.session_state.get("spotify_token")
+    if not token:
+        st.warning("Please connect your Spotify account first.")
+        return None
+
+    headers = {"Authorization": f"Bearer {token}"}
+    url = "https://api.spotify.com/v1/me/player/currently-playing"
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        data = response.json()
+        if data.get("item"):
+            track_id = data["item"]["id"]
+            track_name = data["item"]["name"]
+            artist = data["item"]["artists"][0]["name"]
+            st.write(f"🎵 Now Playing: **{track_name}** by **{artist}**")
+            return track_id
+        else:
+            st.info("Nothing is currently playing.")
+            return None
+    elif response.status_code == 204:
+        st.info("Spotify is not currently playing anything.")
+        return None
+    else:
+        st.error(f"Spotify API error: {response.status_code}")
+        st.text(response.text)
+        return None
+
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+def get_audio_features(track_id):
+    conn = http.client.HTTPSConnection("spotify-audio-features-track-analysis.p.rapidapi.com")
+
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": "spotify-audio-features-track-analysis.p.rapidapi.com"
+    }
+
+    endpoint = f"/tracks/spotify_audio_features?spotify_track_id={track_id}"
+    conn.request("GET", endpoint, headers=headers)
+
+    res = conn.getresponse()
+    data = res.read().decode("utf-8")
+
+    try:
+        parsed = json.loads(data)
+        if parsed.get("result") == "success":
+            audio = parsed["audio_features"]
+            print("✅ Features retrieved successfully.")
+            return {
+                "valence": float(audio["valence"]),
+                "energy": float(audio["energy"]),
+                "danceability": float(audio["danceability"]),
+                "tempo": float(audio["tempo"])
+            }
+        else:
+            print("⚠️ Unexpected response format:", parsed)
+    except Exception as e:
+        print("❌ Error parsing RapidAPI response:", e)
+        print(data)
+    return None
+
 
 # -------------------------------
 # Load mood prediction models
@@ -144,21 +295,34 @@ st.title("🎵 Mood & Emotion-Based Song Recommender")
 st.caption("Real-time emotion recognition + song mood clustering integration")
 
 # --- Section 1: Mood prediction ---
+features = None
+track_id = None
 st.header("1️⃣ Predict Mood from Song Features")
-valence = st.slider("Valence", 0.0, 1.0, 0.5)
-energy = st.slider("Energy", 0.0, 1.0, 0.5)
-danceability = st.slider("Danceability", 0.0, 1.0, 0.5)
-tempo = st.slider("Tempo", 0.0, 250.0, 120.0)
+if "spotify_token" in st.session_state:
+    st.subheader("🎶 Fetching Your Currently Playing Song...")
+    track_id = get_current_track_id()
+
+    if track_id:
+        features = get_audio_features(track_id)
+        if features:
+            st.json(features)
+        else:
+            st.warning("⚠️ Could not retrieve audio features.")
+else:
+    st.info("🔗 Connect your Spotify account above to get started.")
 
 mood_pred = None
 if st.button("🎯 Predict Mood"):
-    df = pd.DataFrame([[valence, energy, danceability, tempo]],
-                      columns=["valence", "energy", "danceability", "tempo"])
-    X_scaled = scaler.transform(df)
-    X_reduced = pca.transform(X_scaled)
-    cluster = gmm.predict(X_reduced)[0]
-    mood_pred = mood_labels[cluster]
-    st.success(f"Predicted Mood: **{mood_pred}**")
+    if features:
+        df = pd.DataFrame([[features["valence"], features["energy"], features["danceability"], features["tempo"]]],
+                          columns=["valence", "energy", "danceability", "tempo"])
+        X_scaled = scaler.transform(df)
+        X_reduced = pca.transform(X_scaled)
+        cluster = gmm.predict(X_reduced)[0]
+        mood_pred = mood_labels[cluster]
+        st.success(f"Predicted Mood: **{mood_pred}**")
+    else:
+        st.error("❌ No audio features available. Ensure Spotify is playing and try again.")
 
 # --- Section 2: Webcam emotion detection ---
 st.header("2️⃣ Real-Time Emotion Detection")
