@@ -1,8 +1,0 @@
-opencv-python
-opencv-contrib-python
-deepface
-tensorflow
-mtcnn
-pandas
-numpy
-tf-keras
